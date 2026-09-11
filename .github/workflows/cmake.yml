@@ -1,0 +1,163 @@
+# Reusable CMake CI: build + ctest on a matrix of OSes, plus optional sanitizer/format jobs.
+# Called from other repos as:
+#   uses: cear12/ci-workflows/.github/workflows/cmake.yml@v1
+name: cmake
+
+on:
+  workflow_call:
+    inputs:
+      source-dir:
+        description: Directory with the top-level CMakeLists.txt
+        type: string
+        default: "."
+      os:
+        description: JSON array of runner labels
+        type: string
+        default: '["ubuntu-latest", "windows-latest", "macos-latest"]'
+      build-type:
+        type: string
+        default: Release
+      cmake-args:
+        description: Extra arguments for the configure step
+        type: string
+        default: ""
+      apt-packages:
+        description: Packages to apt-get install on Linux jobs
+        type: string
+        default: ""
+      brew-packages:
+        description: Packages to brew install on macOS jobs
+        type: string
+        default: ""
+      sanitizers:
+        description: "-fsanitize= value for the Linux/clang job ('' disables the job)"
+        type: string
+        default: "address,undefined"
+      tsan:
+        description: Also run a ThreadSanitizer job
+        type: boolean
+        default: false
+      clang-format:
+        description: Fail when sources don't match .clang-format
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  SRC: ${{ inputs.source-dir }}
+  BUILD_TYPE: ${{ inputs.build-type }}
+  EXTRA_ARGS: ${{ inputs.cmake-args }}
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install packages (Linux)
+        if: runner.os == 'Linux' && inputs.apt-packages != ''
+        env:
+          PKGS: ${{ inputs.apt-packages }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $PKGS
+
+      - name: Install packages (macOS)
+        if: runner.os == 'macOS' && inputs.brew-packages != ''
+        env:
+          PKGS: ${{ inputs.brew-packages }}
+        run: brew install $PKGS
+
+      - name: Configure
+        shell: bash
+        run: cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" $EXTRA_ARGS
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config "$BUILD_TYPE" --parallel
+
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build --build-config "$BUILD_TYPE" --output-on-failure --no-tests=error --timeout 300
+
+  asan-ubsan:
+    if: inputs.sanitizers != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CC: clang
+      CXX: clang++
+      SAN: ${{ inputs.sanitizers }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install packages
+        if: inputs.apt-packages != ''
+        env:
+          PKGS: ${{ inputs.apt-packages }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $PKGS
+
+      - name: Configure
+        run: >
+          cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Debug $EXTRA_ARGS
+          -DCMAKE_CXX_FLAGS="-fsanitize=${SAN} -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build --output-on-failure --no-tests=error --timeout 600
+
+  tsan:
+    if: inputs.tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install packages
+        if: inputs.apt-packages != ''
+        env:
+          PKGS: ${{ inputs.apt-packages }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $PKGS
+
+      # Ubuntu 24.04 runners use high mmap ASLR entropy that makes TSan abort
+      # with "unexpected memory mapping"; lowering it is the standard workaround.
+      - name: Relax ASLR for TSan
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: >
+          cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Debug $EXTRA_ARGS
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build --output-on-failure --no-tests=error --timeout 600
+
+  format:
+    if: inputs.clang-format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jidicula/clang-format-action@v4.18.0
+        with:
+          check-path: ${{ inputs.source-dir }}
+          exclude-regex: "(third_party|build|out)/"
