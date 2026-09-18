@@ -1,0 +1,88 @@
+# Reusable iOS build. No signing: the app is compiled, not shipped, so no Apple
+# account, certificate or provisioning profile is needed.
+#   uses: cear12/ci-workflows/.github/workflows/flutter-ios.yml@v1
+#
+# macOS runners bill at 10x the Linux rate, so callers trigger this by hand
+# (workflow_dispatch), not on every push.
+name: flutter-ios
+
+on:
+  workflow_call:
+    inputs:
+      flutter-version-file:
+        description: File that pins the SDK (.fvmrc or pubspec.yaml with an exact version)
+        type: string
+        default: .fvmrc
+      working-directory:
+        type: string
+        default: "."
+      simulator:
+        description: Also build a .app that can be installed into the iOS Simulator
+        type: boolean
+        default: true
+      retention-days:
+        type: number
+        default: 14
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: ${{ inputs.working-directory }}/${{ inputs.flutter-version-file }}
+          cache: true
+
+      - name: Toolchain versions
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - run: flutter pub get
+
+      # Fails loudly if a plugin has no iOS implementation or the deployment
+      # target is too low for one of the pods.
+      - name: Build unsigned app for a device
+        run: flutter build ios --release --no-codesign
+
+      - name: Package device build
+        run: |
+          cd build/ios/iphoneos
+          zip -qry Runner-device.zip Runner.app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios-device-unsigned
+          path: ${{ inputs.working-directory }}/build/ios/iphoneos/Runner-device.zip
+          retention-days: ${{ inputs.retention-days }}
+
+      # Drop this one into a running simulator on a Mac:
+      #   xcrun simctl install booted Runner.app
+      #   xcrun simctl launch  booted <bundle id>
+      - name: Build for the simulator
+        if: inputs.simulator
+        run: flutter build ios --simulator --debug
+
+      - name: Package simulator build
+        if: inputs.simulator
+        run: |
+          cd build/ios/iphonesimulator
+          zip -qry Runner-simulator.zip Runner.app
+
+      - uses: actions/upload-artifact@v7
+        if: inputs.simulator
+        with:
+          name: ios-simulator
+          path: ${{ inputs.working-directory }}/build/ios/iphonesimulator/Runner-simulator.zip
+          retention-days: ${{ inputs.retention-days }}
