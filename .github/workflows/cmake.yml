@@ -33,6 +33,10 @@ on:
         description: "-fsanitize= value for the Linux/clang job ('' disables the job)"
         type: string
         default: "address,undefined"
+      detect-leaks:
+        description: Let LeakSanitizer fail the ASan job (turn off for code that leaks by design)
+        type: boolean
+        default: true
       tsan:
         description: Also run a ThreadSanitizer job
         type: boolean
@@ -113,7 +117,7 @@ jobs:
 
       - name: Test
         env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          ASAN_OPTIONS: detect_leaks=${{ inputs.detect-leaks && '1' || '0' }}:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build --output-on-failure --no-tests=error --timeout 600
 
