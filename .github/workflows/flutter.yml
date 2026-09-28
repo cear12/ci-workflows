@@ -33,7 +33,7 @@ permissions:
 jobs:
   flutter:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -65,7 +65,11 @@ jobs:
         run: dart format --output=none --set-exit-if-changed lib test
 
       - run: flutter analyze --no-fatal-infos
-      - run: flutter test
+      # A hung test fails after 60s instead of stalling the job; the step cap
+      # is a backstop in case the test runner itself hangs.
+      - name: flutter test
+        run: flutter test --timeout 60s
+        timeout-minutes: 15
 
       - name: Build debug APK
         if: inputs.build-android
